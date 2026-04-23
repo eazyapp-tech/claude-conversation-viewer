@@ -641,6 +641,17 @@ body {
   border: 1px solid var(--border);
 }
 
+.conv-id {
+  font-size: 10px;
+  font-family: monospace;
+  color: var(--text-muted);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 3px;
+}
+
 .conv-project {
   font-size: 11px;
   color: var(--accent);
@@ -660,13 +671,16 @@ body {
 }
 
 .main-header {
-  padding: 12px 20px;
+  padding: 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg-secondary);
+}
+
+.main-header-top {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  min-height: 52px;
+  padding: 10px 20px;
+  min-height: 48px;
 }
 
 .main-header-title {
@@ -681,6 +695,44 @@ body {
 .main-header-actions {
   display: flex;
   gap: 8px;
+  flex-shrink: 0;
+}
+
+.main-header-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 20px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.session-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.session-id {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--cyan, #79c0ff);
+  background: var(--bg);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  user-select: all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.btn-sm {
+  padding: 3px 10px;
+  font-size: 11px;
   flex-shrink: 0;
 }
 
@@ -1073,13 +1125,22 @@ body {
   .app.conv-open .main { display: flex; }
   .back-btn { display: block; }
 
-  .main-header {
-    padding: 10px 14px;
-    gap: 8px;
+  .main-header-top {
+    padding: 8px 12px;
   }
 
   .main-header-title {
     font-size: 13px;
+  }
+
+  .main-header-session {
+    padding: 6px 12px;
+    gap: 6px;
+  }
+
+  .session-id {
+    font-size: 11px;
+    max-width: 200px;
   }
 
   .main-header-actions { gap: 4px; }
@@ -1145,11 +1206,18 @@ body {
   <!-- Main -->
   <div class="main" id="mainPanel">
     <div class="main-header" id="mainHeader">
-      <button class="back-btn" onclick="goBack()">&larr; Back</button>
-      <span class="main-header-title" id="mainTitle">Select a conversation</span>
-      <div class="main-header-actions" id="mainActions" style="display:none">
-        <button class="btn" onclick="exportConversation('md')">Export .md</button>
-        <button class="btn" onclick="exportConversation('json')">Export .json</button>
+      <div class="main-header-top">
+        <button class="back-btn" onclick="goBack()">&larr; Back</button>
+        <span class="main-header-title" id="mainTitle">Select a conversation</span>
+        <div class="main-header-actions" id="mainActions" style="display:none">
+          <button class="btn" onclick="exportConversation('md')">Export .md</button>
+          <button class="btn" onclick="exportConversation('json')">Export .json</button>
+        </div>
+      </div>
+      <div class="main-header-session" id="sessionBar" style="display:none">
+        <span class="session-label">Session ID:</span>
+        <code class="session-id" id="sessionIdText"></code>
+        <button class="btn btn-sm" onclick="copyResume()" id="copyBtn">Copy resume command</button>
       </div>
     </div>
     <div class="messages-container" id="messagesContainer">
@@ -1243,9 +1311,13 @@ function switchTab(tab) {
   const statsPanel = document.getElementById('statsPanel');
 
   if (tab === 'conversations') {
-    mainHeader.style.display = 'flex';
+    mainHeader.style.display = 'block';
     msgContainer.style.display = 'block';
     statsPanel.style.display = 'none';
+    // Hide session bar if no conversation is selected
+    if (!currentConvId) {
+      document.getElementById('sessionBar').style.display = 'none';
+    }
   } else {
     mainHeader.style.display = 'none';
     msgContainer.style.display = 'none';
@@ -1300,6 +1372,7 @@ function renderConversationList(convs) {
     <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" onclick="loadConversation('${c.id}')">
       <div class="conv-project" title="${escapeHtml(c.project_path || '')}">${escapeHtml(shortenPath(c.project_path) || c.project)}</div>
       <div class="conv-title">${escapeHtml(c.title)}</div>
+      <div class="conv-id">${c.id}</div>
       <div class="conv-meta">
         <span>${formatDate(c.first_timestamp)}</span>
         <span>${c.total_messages} msgs</span>
@@ -1330,6 +1403,8 @@ async function loadConversation(id) {
   const msgs = data.messages;
 
   document.getElementById('mainTitle').textContent = meta.title;
+  document.getElementById('sessionBar').style.display = 'flex';
+  document.getElementById('sessionIdText').textContent = meta.id;
 
   if (msgs.length === 0) {
     container.innerHTML = '<div class="empty-state"><div>No messages in this conversation</div></div>';
@@ -1473,6 +1548,17 @@ function goBack() {
   currentConvId = null;
 }
 
+// ---- Copy resume command ----
+function copyResume() {
+  if (!currentConvId) return;
+  const cmd = `claude --resume ${currentConvId}`;
+  navigator.clipboard.writeText(cmd).then(() => {
+    const btn = document.getElementById('copyBtn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy resume command'; }, 2000);
+  });
+}
+
 // ---- Export ----
 function exportConversation(format) {
   if (!currentConvId) return;
@@ -1563,11 +1649,98 @@ async function loadStats() {
 # Main
 # ---------------------------------------------------------------------------
 
+def _get_plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / "com.claude-conversation-viewer.plist"
+
+
+def _get_script_path() -> str:
+    return os.path.abspath(__file__)
+
+
+def install_service(port: int):
+    """Install a macOS LaunchAgent to auto-start on login."""
+    if platform.system() != "Darwin":
+        print("[ERROR] Auto-start is currently supported on macOS only.")
+        print("        On Linux, add this to your crontab:")
+        print(f"        @reboot python3 {_get_script_path()} --port {port} --no-open &")
+        return
+
+    plist_path = _get_plist_path()
+    script = _get_script_path()
+    python = sys.executable
+
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-conversation-viewer</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python}</string>
+        <string>{script}</string>
+        <string>--port</string>
+        <string>{port}</string>
+        <string>--no-open</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-conversation-viewer.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-conversation-viewer.log</string>
+</dict>
+</plist>
+"""
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist_content)
+
+    # Load the service
+    os.system(f"launchctl unload {plist_path} 2>/dev/null")
+    os.system(f"launchctl load {plist_path}")
+
+    print(f"\n  Service installed and started!")
+    print(f"  ================================")
+    print(f"  URL:       http://127.0.0.1:{port}")
+    print(f"  Plist:     {plist_path}")
+    print(f"  Log:       /tmp/claude-conversation-viewer.log")
+    print(f"  Auto-starts on login.\n")
+    print(f"  To stop:   python3 {script} --uninstall")
+    print(f"  To check:  launchctl list | grep claude-conversation\n")
+
+
+def uninstall_service():
+    """Remove the macOS LaunchAgent."""
+    if platform.system() != "Darwin":
+        print("[INFO] Remove the crontab entry manually: crontab -e")
+        return
+
+    plist_path = _get_plist_path()
+    if plist_path.exists():
+        os.system(f"launchctl unload {plist_path} 2>/dev/null")
+        plist_path.unlink()
+        print("\n  Service stopped and removed.\n")
+    else:
+        print("\n  No service installed.\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Claude Code Conversation Viewer")
     parser.add_argument("--port", type=int, default=5005, help="Port to serve on (default: 5005)")
     parser.add_argument("--no-open", action="store_true", help="Don't auto-open browser")
+    parser.add_argument("--install", action="store_true", help="Install as background service (auto-start on login)")
+    parser.add_argument("--uninstall", action="store_true", help="Remove background service")
     args = parser.parse_args()
+
+    if args.uninstall:
+        uninstall_service()
+        return
+
+    if args.install:
+        install_service(args.port)
+        return
 
     STORE.load()
 
@@ -1578,7 +1751,8 @@ def main():
     print(f"  ================================")
     print(f"  {len(STORE.conversations)} conversations from {len(STORE.projects)} projects")
     print(f"  Running at: {url}")
-    print(f"  Press Ctrl+C to stop\n")
+    print(f"  Press Ctrl+C to stop")
+    print(f"  Tip: run with --install to auto-start on login\n")
 
     if not args.no_open:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
