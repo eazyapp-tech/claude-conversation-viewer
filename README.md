@@ -5,6 +5,7 @@ Browse, search, and resume your [Claude Code](https://docs.anthropic.com/en/docs
 ![Python 3.7+](https://img.shields.io/badge/python-3.7%2B-blue)
 ![No Dependencies](https://img.shields.io/badge/dependencies-none-green)
 ![Cross Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
+[![PyPI](https://img.shields.io/pypi/v/claude-conversation-viewer)](https://pypi.org/project/claude-conversation-viewer/)
 
 ## Features
 
@@ -15,36 +16,38 @@ Browse, search, and resume your [Claude Code](https://docs.anthropic.com/en/docs
 - **Usage stats** -- token counts, model usage breakdown, conversations per project
 - **Two interfaces** -- Web GUI and Terminal CLI, both zero-dependency
 - **Cross-platform** -- auto-detects `~/.claude/` on macOS/Linux and `%USERPROFILE%\.claude\` on Windows
+- **Update notifications** -- automatically checks for new versions and prompts to update
 
 ## Quick Start
 
+### Install from PyPI
+
 ```bash
-git clone https://github.com/eazyapp-tech/claude-conversation-viewer.git
-cd claude-conversation-viewer
+pip install claude-conversation-viewer
 ```
 
 ### Web UI
 
 ```bash
-python3 claude_conversation_viewer.py
+claude-conversations
 ```
 
 Opens a browser-based GUI at `http://127.0.0.1:5005` with search, filters, stats dashboard, and export.
 
 ```
-python3 claude_conversation_viewer.py --port 8080    # custom port
-python3 claude_conversation_viewer.py --no-open      # don't auto-open browser
+claude-conversations --port 8080    # custom port
+claude-conversations --no-open      # don't auto-open browser
 ```
 
 ### CLI
 
 ```bash
-python3 claude_conversations_cli.py                          # interactive browser
-python3 claude_conversations_cli.py --list                   # print all conversations
-python3 claude_conversations_cli.py --search "auth"          # search by keyword
-python3 claude_conversations_cli.py --project "myproject"    # filter by project
-python3 claude_conversations_cli.py --view <session-id>      # view full conversation
-python3 claude_conversations_cli.py --resume <session-id>    # resume in Claude Code
+claude-conversations-cli                          # interactive browser
+claude-conversations-cli --list                   # print all conversations
+claude-conversations-cli --search "auth"          # search by keyword
+claude-conversations-cli --project "myproject"    # filter by project
+claude-conversations-cli --view <session-id>      # view full conversation
+claude-conversations-cli --resume <session-id>    # resume in Claude Code
 ```
 
 In interactive mode:
@@ -60,9 +63,32 @@ In interactive mode:
 
 Partial session IDs work too -- `--view 4925f6c7` matches `4925f6c7-35f2-4340-bad6-ad59d4d724ee`.
 
+### Install from source
+
+```bash
+git clone https://github.com/eazyapp-tech/claude-conversation-viewer.git
+cd claude-conversation-viewer
+pip install .
+```
+
+Or run directly without installing:
+
+```bash
+python3 claude_conversation_viewer.py          # Web UI
+python3 claude_conversations_cli.py            # CLI
+```
+
+## Update
+
+```bash
+pip install --upgrade claude-conversation-viewer
+```
+
+The tool automatically checks for updates and shows a notification when a new version is available.
+
 ## Requirements
 
-- Python 3.7+ (standard library only -- no `pip install` needed)
+- Python 3.7+ (standard library only -- no external dependencies)
 - Existing Claude Code conversations in `~/.claude/projects/`
 - Claude Code CLI installed (for `--resume`)
 
