@@ -117,7 +117,7 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
                             version = obj.get("version")
                         if title is None:
                             cleaned = re.sub(r"<[^>]+>", "", content).strip()
-                            if cleaned:
+                            if cleaned and "continued from a previous conversation" not in cleaned.lower():
                                 title = cleaned[:120]
                     else:
                         user_msg_count += 1
@@ -144,6 +144,7 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
         "project": project_slug,
         "project_path": cwd or decode_project_slug(project_slug),
         "title": ai_title or title or "(no title)",
+        "has_ai_title": ai_title is not None,
         "first_timestamp": first_timestamp,
         "last_timestamp": last_timestamp,
         "models": sorted(models),
@@ -358,8 +359,6 @@ class ConversationStore:
         print(f"[INFO] Loaded {count} conversations from {len(self.projects)} projects, {len(self.chains)} chains")
 
     def _build_chains(self):
-        from datetime import datetime
-
         # Tier 1: slug-based linking
         slug_groups: dict[str, list[dict]] = {}
         for c in self.conversations:
@@ -367,7 +366,7 @@ class ConversationStore:
                 slug_groups.setdefault(c["slug"], []).append(c)
 
         linked_ids: set[str] = set()
-        for slug, members in slug_groups.items():
+        for members in slug_groups.values():
             if len(members) < 2:
                 continue
             members.sort(key=lambda m: m.get("first_timestamp") or "")
@@ -393,11 +392,6 @@ class ConversationStore:
             if not candidates:
                 continue
 
-            best = min(candidates, key=lambda c: cont["first_timestamp"] if not c["last_timestamp"] else c["last_timestamp"], default=None)
-            if not best:
-                continue
-
-            # Find closest by gap
             best = None
             best_gap = float("inf")
             for cand in candidates:
@@ -414,9 +408,8 @@ class ConversationStore:
             if best and best_gap <= 3600:
                 parent_of[cont["id"]] = best["id"]
 
-        # Walk parent links to build chains
+        # Walk parent links to build chains, resolving through existing slug chains
         for child_id, par_id in parent_of.items():
-            # Find the root by walking up
             root_id = par_id
             visited = {child_id, par_id}
             while root_id in parent_of:
@@ -424,6 +417,8 @@ class ConversationStore:
                 if root_id in visited:
                     break
                 visited.add(root_id)
+            # If the resolved root is already a member of a slug chain, use that chain's root
+            root_id = self.chain_of.get(root_id, root_id)
 
             if root_id in self.chains:
                 if child_id not in self.chains[root_id]:
@@ -432,8 +427,7 @@ class ConversationStore:
                 self.chains[root_id] = [root_id, child_id]
 
             self.chain_of[child_id] = root_id
-            if root_id not in self.chain_of:
-                self.chain_of[root_id] = root_id
+            self.chain_of.setdefault(root_id, root_id)
 
         # Sort each chain by timestamp and annotate metadata
         for root_id, chain_ids in self.chains.items():
@@ -444,14 +438,16 @@ class ConversationStore:
             self.chains[root_id] = unique_ids
 
             chain_parts = []
+            root_title = self.by_id[root_id].get("title", "")
             for i, sid in enumerate(unique_ids):
                 meta = self.by_id[sid]
                 meta["chain_id"] = root_id
                 meta["chain_index"] = i
                 meta["chain_size"] = len(unique_ids)
-                raw_title = meta.get("title", "")
-                is_cont = raw_title.lower().startswith("this session is being continued")
-                display_title = f"Part {i + 1}" if not raw_title or is_cont else raw_title
+                if i == 0:
+                    display_title = root_title or "Part 1"
+                else:
+                    display_title = meta["title"] if meta.get("has_ai_title") else f"Part {i + 1}"
                 chain_parts.append({
                     "id": sid,
                     "title": display_title,
@@ -569,15 +565,33 @@ class Handler(BaseHTTPRequestHandler):
             if conv_id not in STORE.by_id:
                 self._json_response({"error": "Not found"}, 404)
                 return
-            filepath = STORE._file_map[conv_id]
             meta = STORE.by_id[conv_id]
-            if fmt == "json":
-                messages = parse_full_conversation(filepath)
-                content = json.dumps({"metadata": meta, "messages": messages}, indent=2)
-                self._download_response(content, f"{conv_id}.json", "application/json")
+            is_chain = conv_id in STORE.chains and len(STORE.chains[conv_id]) > 1
+            if is_chain:
+                chain_ids = STORE.chains[conv_id]
+                all_messages = []
+                for sid in chain_ids:
+                    if sid in STORE._file_map:
+                        all_messages.extend(parse_full_conversation(STORE._file_map[sid]))
+                if fmt == "json":
+                    content = json.dumps({"metadata": meta, "messages": all_messages}, indent=2)
+                    self._download_response(content, f"{conv_id}.json", "application/json")
+                else:
+                    parts_md = []
+                    for sid in chain_ids:
+                        if sid in STORE._file_map:
+                            parts_md.append(export_as_markdown(STORE._file_map[sid], STORE.by_id[sid]))
+                    content = "\n\n---\n\n".join(parts_md)
+                    self._download_response(content, f"{conv_id}.md")
             else:
-                md = export_as_markdown(filepath, meta)
-                self._download_response(md, f"{conv_id}.md")
+                filepath = STORE._file_map[conv_id]
+                if fmt == "json":
+                    messages = parse_full_conversation(filepath)
+                    content = json.dumps({"metadata": meta, "messages": messages}, indent=2)
+                    self._download_response(content, f"{conv_id}.json", "application/json")
+                else:
+                    md = export_as_markdown(filepath, meta)
+                    self._download_response(md, f"{conv_id}.md")
 
         elif path.startswith("/api/chain/"):
             root_id = path.split("/")[-1]
@@ -585,15 +599,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response({"error": "Chain not found"}, 404)
                 return
             chain_ids = STORE.chains[root_id]
+            root_title = STORE.by_id[root_id].get("title", "")
             all_messages = []
             for i, sid in enumerate(chain_ids):
                 if sid not in STORE._file_map:
                     continue
                 if i > 0:
                     part_meta = STORE.by_id.get(sid, {})
-                    raw_title = part_meta.get("title", "")
-                    is_continuation_title = raw_title.lower().startswith("this session is being continued")
-                    title = f"Part {i + 1}" if not raw_title or is_continuation_title else raw_title
+                    title = part_meta["title"] if part_meta.get("has_ai_title") else f"Part {i + 1}"
                     all_messages.append({
                         "type": "chain_divider",
                         "part": i,
@@ -1752,6 +1765,10 @@ async function loadChain(rootId, scrollToPartId) {
   document.getElementById('mainActions').style.display = 'flex';
 
   const res = await fetch(`/api/chain/${rootId}`);
+  if (!res.ok) {
+    container.innerHTML = '<div class="empty-state"><div>Chain not found</div></div>';
+    return;
+  }
   const data = await res.json();
   const m = data.metadata;
   const msgs = data.messages;
