@@ -63,6 +63,7 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
     session_id = filepath.stem
     project_slug = filepath.parent.name
     title = None
+    ai_title = None
     first_timestamp = None
     last_timestamp = None
     models = set()
@@ -74,6 +75,8 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
     assistant_msg_count = 0
     cwd = None
     version = None
+    slug = None
+    is_continuation = False
 
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -84,6 +87,13 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+
+                if not slug and obj.get("slug"):
+                    slug = obj["slug"]
+
+                if obj.get("type") == "ai-title" and not ai_title:
+                    ai_title = obj.get("aiTitle")
                     continue
 
                 msg = obj.get("message", {})
@@ -97,16 +107,18 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
 
                 if role == "user" and obj.get("type") == "user":
                     content = msg.get("content", "")
-                    if isinstance(content, str) and content and not content.startswith("<"):
+                    if isinstance(content, str) and content:
                         user_msg_count += 1
-                        if title is None:
-                            title = content[:120]
+                        if not is_continuation and "continued from a previous conversation" in content.lower():
+                            is_continuation = True
                         if cwd is None:
                             cwd = obj.get("cwd")
                         if version is None:
                             version = obj.get("version")
-                    elif isinstance(content, str) and content.startswith("<"):
-                        pass  # meta/command messages
+                        if title is None:
+                            cleaned = re.sub(r"<[^>]+>", "", content).strip()
+                            if cleaned and "continued from a previous conversation" not in cleaned.lower():
+                                title = cleaned[:120]
                     else:
                         user_msg_count += 1
 
@@ -131,7 +143,8 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
         "id": session_id,
         "project": project_slug,
         "project_path": cwd or decode_project_slug(project_slug),
-        "title": title or "(no title)",
+        "title": ai_title or title or "(no title)",
+        "has_ai_title": ai_title is not None,
         "first_timestamp": first_timestamp,
         "last_timestamp": last_timestamp,
         "models": sorted(models),
@@ -145,6 +158,8 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
         "cwd": cwd,
         "version": version,
         "file_path": str(filepath),
+        "slug": slug,
+        "is_continuation": is_continuation,
     }
 
 
@@ -307,6 +322,8 @@ class ConversationStore:
         self.by_id: dict[str, dict] = {}
         self.projects: list[str] = []
         self._file_map: dict[str, Path] = {}
+        self.chains: dict[str, list[str]] = {}
+        self.chain_of: dict[str, str] = {}
 
     def load(self):
         projects_dir = get_projects_dir()
@@ -321,7 +338,11 @@ class ConversationStore:
                 continue
             if project_dir.name.startswith("."):
                 continue
+            if project_dir.name == "subagents":
+                continue
             for jsonl_file in sorted(project_dir.glob("*.jsonl")):
+                if jsonl_file.stem.startswith("agent-"):
+                    continue
                 meta = parse_conversation_metadata(jsonl_file)
                 if meta:
                     self.conversations.append(meta)
@@ -334,7 +355,106 @@ class ConversationStore:
             key=lambda c: c.get("last_timestamp") or "", reverse=True
         )
         self.projects = sorted(set(c["project"] for c in self.conversations))
-        print(f"[INFO] Loaded {count} conversations from {len(self.projects)} projects")
+        self._build_chains()
+        print(f"[INFO] Loaded {count} conversations from {len(self.projects)} projects, {len(self.chains)} chains")
+
+    def _build_chains(self):
+        # Tier 1: slug-based linking
+        slug_groups: dict[str, list[dict]] = {}
+        for c in self.conversations:
+            if c.get("slug"):
+                slug_groups.setdefault(c["slug"], []).append(c)
+
+        linked_ids: set[str] = set()
+        for members in slug_groups.values():
+            if len(members) < 2:
+                continue
+            members.sort(key=lambda m: m.get("first_timestamp") or "")
+            root = next((m for m in members if not m["is_continuation"]), members[0])
+            chain_ids = [root["id"]] + [m["id"] for m in members if m["id"] != root["id"]]
+            self.chains[root["id"]] = chain_ids
+            for sid in chain_ids:
+                self.chain_of[sid] = root["id"]
+                linked_ids.add(sid)
+
+        # Tier 2: timestamp proximity for unlinked continuations
+        unlinked = [c for c in self.conversations if c["is_continuation"] and c["id"] not in linked_ids]
+        parent_of: dict[str, str] = {}
+
+        for cont in unlinked:
+            candidates = [
+                c for c in self.conversations
+                if c["project"] == cont["project"]
+                and c["id"] != cont["id"]
+                and c.get("last_timestamp") and cont.get("first_timestamp")
+                and c["last_timestamp"] < cont["first_timestamp"]
+            ]
+            if not candidates:
+                continue
+
+            best = None
+            best_gap = float("inf")
+            for cand in candidates:
+                try:
+                    t1 = datetime.fromisoformat(cand["last_timestamp"].replace("Z", "+00:00"))
+                    t2 = datetime.fromisoformat(cont["first_timestamp"].replace("Z", "+00:00"))
+                    gap = (t2 - t1).total_seconds()
+                    if 0 < gap < best_gap:
+                        best_gap = gap
+                        best = cand
+                except (ValueError, TypeError):
+                    continue
+
+            if best and best_gap <= 3600:
+                parent_of[cont["id"]] = best["id"]
+
+        # Walk parent links to build chains, resolving through existing slug chains
+        for child_id, par_id in parent_of.items():
+            root_id = par_id
+            visited = {child_id, par_id}
+            while root_id in parent_of:
+                root_id = parent_of[root_id]
+                if root_id in visited:
+                    break
+                visited.add(root_id)
+            # If the resolved root is already a member of a slug chain, use that chain's root
+            root_id = self.chain_of.get(root_id, root_id)
+
+            if root_id in self.chains:
+                if child_id not in self.chains[root_id]:
+                    self.chains[root_id].append(child_id)
+            else:
+                self.chains[root_id] = [root_id, child_id]
+
+            self.chain_of[child_id] = root_id
+            self.chain_of.setdefault(root_id, root_id)
+
+        # Sort each chain by timestamp and annotate metadata
+        for root_id, chain_ids in self.chains.items():
+            unique_ids = list(dict.fromkeys(chain_ids))
+            if root_id not in unique_ids:
+                unique_ids.insert(0, root_id)
+            unique_ids.sort(key=lambda sid: self.by_id[sid].get("first_timestamp") or "")
+            self.chains[root_id] = unique_ids
+
+            chain_parts = []
+            root_title = self.by_id[root_id].get("title", "")
+            for i, sid in enumerate(unique_ids):
+                meta = self.by_id[sid]
+                meta["chain_id"] = root_id
+                meta["chain_index"] = i
+                meta["chain_size"] = len(unique_ids)
+                if i == 0:
+                    display_title = root_title or "Part 1"
+                else:
+                    display_title = meta["title"] if meta.get("has_ai_title") else f"Part {i + 1}"
+                chain_parts.append({
+                    "id": sid,
+                    "title": display_title,
+                    "first_timestamp": meta.get("first_timestamp"),
+                })
+
+            self.by_id[root_id]["chain_parts"] = chain_parts
 
     def get_stats(self) -> dict:
         total_input = sum(c["total_input_tokens"] for c in self.conversations)
@@ -353,8 +473,12 @@ class ConversationStore:
             p = c["project_path"]
             project_counts[p] = project_counts.get(p, 0) + 1
 
+        chain_parts_count = sum(len(v) for v in self.chains.values())
+        logical_count = len(self.conversations) - chain_parts_count + len(self.chains)
+
         return {
             "total_conversations": len(self.conversations),
+            "total_logical_conversations": logical_count,
             "total_projects": len(self.projects),
             "total_messages": total_messages,
             "total_input_tokens": total_input,
@@ -364,6 +488,8 @@ class ConversationStore:
             "total_tokens": total_input + total_output + total_cache_create + total_cache_read,
             "model_usage": dict(sorted(model_counts.items(), key=lambda x: -x[1])),
             "project_counts": dict(sorted(project_counts.items(), key=lambda x: -x[1])),
+            "chain_count": len(self.chains),
+            "total_chain_parts": chain_parts_count,
         }
 
 
@@ -411,9 +537,14 @@ class Handler(BaseHTTPRequestHandler):
             self._html_response(HTML_PAGE)
 
         elif path == "/api/conversations":
+            visible = [
+                c for c in STORE.conversations
+                if c.get("chain_index", 0) == 0
+            ]
             self._json_response({
-                "conversations": STORE.conversations,
+                "conversations": visible,
                 "projects": STORE.projects,
+                "chain_count": len(STORE.chains),
             })
 
         elif path.startswith("/api/conversation/"):
@@ -434,15 +565,64 @@ class Handler(BaseHTTPRequestHandler):
             if conv_id not in STORE.by_id:
                 self._json_response({"error": "Not found"}, 404)
                 return
-            filepath = STORE._file_map[conv_id]
             meta = STORE.by_id[conv_id]
-            if fmt == "json":
-                messages = parse_full_conversation(filepath)
-                content = json.dumps({"metadata": meta, "messages": messages}, indent=2)
-                self._download_response(content, f"{conv_id}.json", "application/json")
+            is_chain = conv_id in STORE.chains and len(STORE.chains[conv_id]) > 1
+            if is_chain:
+                chain_ids = STORE.chains[conv_id]
+                all_messages = []
+                for sid in chain_ids:
+                    if sid in STORE._file_map:
+                        all_messages.extend(parse_full_conversation(STORE._file_map[sid]))
+                if fmt == "json":
+                    content = json.dumps({"metadata": meta, "messages": all_messages}, indent=2)
+                    self._download_response(content, f"{conv_id}.json", "application/json")
+                else:
+                    parts_md = []
+                    for sid in chain_ids:
+                        if sid in STORE._file_map:
+                            parts_md.append(export_as_markdown(STORE._file_map[sid], STORE.by_id[sid]))
+                    content = "\n\n---\n\n".join(parts_md)
+                    self._download_response(content, f"{conv_id}.md")
             else:
-                md = export_as_markdown(filepath, meta)
-                self._download_response(md, f"{conv_id}.md")
+                filepath = STORE._file_map[conv_id]
+                if fmt == "json":
+                    messages = parse_full_conversation(filepath)
+                    content = json.dumps({"metadata": meta, "messages": messages}, indent=2)
+                    self._download_response(content, f"{conv_id}.json", "application/json")
+                else:
+                    md = export_as_markdown(filepath, meta)
+                    self._download_response(md, f"{conv_id}.md")
+
+        elif path.startswith("/api/chain/"):
+            root_id = path.split("/")[-1]
+            if root_id not in STORE.chains:
+                self._json_response({"error": "Chain not found"}, 404)
+                return
+            chain_ids = STORE.chains[root_id]
+            root_title = STORE.by_id[root_id].get("title", "")
+            all_messages = []
+            for i, sid in enumerate(chain_ids):
+                if sid not in STORE._file_map:
+                    continue
+                if i > 0:
+                    part_meta = STORE.by_id.get(sid, {})
+                    title = part_meta["title"] if part_meta.get("has_ai_title") else f"Part {i + 1}"
+                    all_messages.append({
+                        "type": "chain_divider",
+                        "part": i,
+                        "title": title,
+                        "timestamp": part_meta.get("first_timestamp"),
+                        "session_id": sid,
+                    })
+                msgs = parse_full_conversation(STORE._file_map[sid])
+                for msg in msgs:
+                    msg["part_index"] = i
+                all_messages.extend(msgs)
+            self._json_response({
+                "metadata": STORE.by_id[root_id],
+                "messages": all_messages,
+                "chain_parts": STORE.by_id[root_id].get("chain_parts", []),
+            })
 
         elif path == "/api/stats":
             self._json_response(STORE.get_stats())
@@ -650,6 +830,55 @@ body {
   font-weight: 500;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
+}
+
+.chain-badge {
+  display: inline-block;
+  font-size: 10px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 6px;
+  font-weight: 500;
+}
+
+.chain-toggle {
+  cursor: pointer;
+  user-select: none;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-right: 4px;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.chain-toggle.expanded { transform: rotate(90deg); }
+
+.chain-children {
+  padding-left: 16px;
+  border-left: 2px solid var(--border);
+  margin-left: 8px;
+  display: none;
+}
+.chain-children.expanded { display: block; }
+
+.chain-child {
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+  border-radius: 4px;
+}
+.chain-child:hover { color: var(--text); background: var(--bg-tertiary); }
+
+.chain-divider {
+  text-align: center;
+  padding: 16px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-top: 1px dashed var(--border);
+  margin: 16px 0;
+  font-style: italic;
 }
 
 .conv-id {
@@ -1438,10 +1667,25 @@ function renderConversationList(convs) {
     return;
   }
 
-  container.innerHTML = convs.map(c => `
+  container.innerHTML = convs.map(c => {
+    const chainBadge = (c.chain_size && c.chain_size > 1)
+      ? `<span class="chain-badge">${c.chain_size} parts</span>`
+      : '';
+    const chainToggle = (c.chain_parts && c.chain_parts.length > 1)
+      ? `<span class="chain-toggle" onclick="event.stopPropagation(); toggleChainChildren('${c.id}')">&#9654;</span>`
+      : '';
+    const chainChildren = (c.chain_parts && c.chain_parts.length > 1)
+      ? `<div class="chain-children" id="chain-children-${c.id}">${
+          c.chain_parts.slice(1).map((p, i) =>
+            `<div class="chain-child" onclick="event.stopPropagation(); loadChain('${c.id}', '${p.id}')">Part ${i + 2} &middot; ${formatDate(p.first_timestamp)}${p.title ? ' &middot; ' + escapeHtml(p.title.substring(0, 40)) : ''}</div>`
+          ).join('')
+        }</div>`
+      : '';
+
+    return `
     <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" onclick="loadConversation('${c.id}')">
       <div class="conv-project" title="${escapeHtml(c.project_path || '')}">${escapeHtml(shortenPath(c.project_path) || c.project)}</div>
-      <div class="conv-title">${escapeHtml(c.title)}</div>
+      <div class="conv-title">${chainToggle}${escapeHtml(c.title)}${chainBadge}</div>
       <div class="conv-id">${c.id}</div>
       <div class="conv-meta">
         <span>${formatDate(c.first_timestamp)}</span>
@@ -1449,12 +1693,27 @@ function renderConversationList(convs) {
         ${c.models.length ? `<span class="badge">${escapeHtml(c.models[0])}</span>` : ''}
         <span>${formatTokens(c.total_input_tokens + c.total_output_tokens)} tok</span>
       </div>
-    </div>
-  `).join('');
+    </div>${chainChildren}`;
+  }).join('');
+}
+
+function toggleChainChildren(rootId) {
+  const el = document.getElementById('chain-children-' + rootId);
+  const toggle = el?.previousElementSibling?.querySelector('.chain-toggle');
+  if (el) {
+    el.classList.toggle('expanded');
+    if (toggle) toggle.classList.toggle('expanded');
+  }
 }
 
 // ---- Load conversation ----
 async function loadConversation(id) {
+  // If this is a chain root, load the full chain
+  const meta = allConversations.find(c => c.id === id);
+  if (meta && meta.chain_size && meta.chain_size > 1) {
+    return loadChain(id, null);
+  }
+
   currentConvId = id;
   document.getElementById('app').classList.add('conv-open');
 
@@ -1469,12 +1728,12 @@ async function loadConversation(id) {
 
   const res = await fetch(`/api/conversation/${id}`);
   const data = await res.json();
-  const meta = data.metadata;
+  const m = data.metadata;
   const msgs = data.messages;
 
-  document.getElementById('mainTitle').textContent = meta.title;
+  document.getElementById('mainTitle').textContent = m.title;
   document.getElementById('sessionBar').style.display = 'flex';
-  document.getElementById('sessionIdText').textContent = meta.id;
+  document.getElementById('sessionIdText').textContent = m.id;
 
   if (msgs.length === 0) {
     container.innerHTML = '<div class="empty-state"><div>No messages in this conversation</div></div>';
@@ -1493,7 +1752,62 @@ async function loadConversation(id) {
   container.scrollTop = 0;
 }
 
+async function loadChain(rootId, scrollToPartId) {
+  currentConvId = rootId;
+  document.getElementById('app').classList.add('conv-open');
+
+  document.querySelectorAll('.conv-item').forEach(el => {
+    el.classList.toggle('active', el.onclick.toString().includes(rootId));
+  });
+
+  const container = document.getElementById('messagesContainer');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading chain...</div>';
+  document.getElementById('mainActions').style.display = 'flex';
+
+  const res = await fetch(`/api/chain/${rootId}`);
+  if (!res.ok) {
+    container.innerHTML = '<div class="empty-state"><div>Chain not found</div></div>';
+    return;
+  }
+  const data = await res.json();
+  const m = data.metadata;
+  const msgs = data.messages;
+  const parts = data.chain_parts || [];
+
+  document.getElementById('mainTitle').textContent = m.title + ` (${parts.length} parts)`;
+  document.getElementById('sessionBar').style.display = 'flex';
+  document.getElementById('sessionIdText').textContent = m.id;
+
+  if (msgs.length === 0) {
+    container.innerHTML = '<div class="empty-state"><div>No messages in this chain</div></div>';
+    return;
+  }
+
+  container.innerHTML = msgs.map(renderMessage).join('');
+
+  if (typeof hljs !== 'undefined') {
+    container.querySelectorAll('pre code').forEach(el => {
+      try { hljs.highlightElement(el); } catch(e) {}
+    });
+  }
+
+  if (scrollToPartId) {
+    const divider = document.getElementById('chain-part-' + scrollToPartId);
+    if (divider) {
+      setTimeout(() => divider.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      return;
+    }
+  }
+  container.scrollTop = 0;
+}
+
 function renderMessage(msg) {
+  if (msg.type === 'chain_divider') {
+    const time = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
+    const title = msg.title || ('Part ' + (msg.part + 1));
+    return `<div class="chain-divider" id="chain-part-${msg.session_id || msg.part}">--- ${escapeHtml(title)} &middot; ${time} ---</div>`;
+  }
+
   const role = msg.role;
   const time = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
   const content = msg.content || [];
@@ -1669,8 +1983,8 @@ async function loadStats() {
     <h2 style="margin-bottom: 20px; font-size: 20px;">Usage Statistics</h2>
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-value">${stats.total_conversations}</div>
-        <div class="stat-label">Total Conversations</div>
+        <div class="stat-value">${stats.total_logical_conversations || stats.total_conversations}</div>
+        <div class="stat-label">Conversations${stats.chain_count ? ` (${stats.chain_count} multi-part)` : ''}</div>
       </div>
       <div class="stat-card">
         <div class="stat-value">${stats.total_projects}</div>
