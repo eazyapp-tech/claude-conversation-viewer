@@ -27,7 +27,9 @@ Existing graphify: `None`
 - `pyproject.toml`
 
 ## Entrypoints
-- None detected
+- `claude-conversations` → `claude_conversation_viewer.web:main` (from `pyproject.toml`)
+- `claude-conversations-cli` → `claude_conversation_viewer.cli:main` (from `pyproject.toml`)
+- `python3 claude_conversations_cli.py` → compatibility CLI wrapper
 
 ## Representative Files by Language
 ### markdown

@@ -4,11 +4,11 @@
 
 ## `claude_conversation_viewer/` — Main Package
 
-### `__init__.py`
+### `claude_conversation_viewer/__init__.py`
 - Exports `__version__ = "1.0.0"`
 - Used by `update_checker.py` to compare against PyPI
 
-### `web.py`
+### `claude_conversation_viewer/web.py`
 - **Responsibility:** Web UI server + full data layer for the browser interface
 - Key functions:
   - `get_claude_dir()` / `get_projects_dir()` — platform-aware path detection
@@ -19,7 +19,7 @@
   - `main()` — argument parsing, server startup, optional browser open, optional macOS LaunchAgent install/uninstall
 - The SPA (HTML/CSS/JS) is embedded directly in this file (not shown in truncated content)
 
-### `cli.py`
+### `claude_conversation_viewer/cli.py`
 - **Responsibility:** Terminal CLI — interactive REPL and non-interactive flag modes
 - Key components:
   - `class C` — ANSI color codes, TTY-aware
@@ -33,7 +33,7 @@
   - `format_date()` — human-relative timestamps
   - `main()` — argument parsing, interactive loop, non-interactive dispatch
 
-### `update_checker.py`
+### `claude_conversation_viewer/update_checker.py`
 - **Responsibility:** PyPI version check with file-based caching
 - Key functions:
   - `_parse_version(v)` — converts semver string to comparable tuple

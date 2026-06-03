@@ -86,3 +86,5 @@ All imports of `update_checker` are guarded with `try/except ImportError`, makin
 - **`setup.cfg` contents** — file listed in repo tree but content not provided; assumed to mirror `pyproject.toml` metadata for pip <22 compatibility per DOCS.md
 - **`/api/conversations` sort/filter parameters** — query string handling is in the truncated HTTP handler section of `web.py`
 - **Session chain data exposed to API** — `ConversationStore.chains` and `chain_of` are built but how they are serialized in `/api/conversations` response is in truncated code
+
+| `GET /api/chain/{id}` | Return a conversation chain by id; confirmed in `claude_conversation_viewer/web.py` path handler |

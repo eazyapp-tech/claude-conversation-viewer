@@ -2,18 +2,35 @@
   "dependency_files": [
     "pyproject.toml"
   ],
-  "entrypoints": [],
+  "entrypoints": [
+    {
+      "path": "claude_conversation_viewer/web.py",
+      "symbol": "main",
+      "invocation": "claude-conversations"
+    },
+    {
+      "path": "claude_conversation_viewer/cli.py",
+      "symbol": "main",
+      "invocation": "claude-conversations-cli"
+    },
+    {
+      "path": "claude_conversations_cli.py",
+      "symbol": null,
+      "invocation": "python3 claude_conversations_cli.py"
+    }
+  ],
   "existing_graphify_path": null,
   "file_count_indexed": 10,
   "generated_at": "2026-06-03T14:42:59+05:30",
   "git": {
-    "branch": "hermes/project-intelligence-main/claude-conversation-viewer",
+    "branch": "knowledge-graph",
     "dirty": false,
     "head": "ed15334a2344ea175d8f5d1b5e21c3d7a18d6603",
     "head_short": "ed15334",
     "last_commit_at": "2026-04-29T18:23:52+05:30",
     "origin": "git@github.com:eazyapp-tech/claude-conversation-viewer.git",
-    "status_entries": []
+    "status_entries": [],
+    "analysis_base": "origin/main"
   },
   "git_tracked_file_count": 11,
   "group": "standalone",
