@@ -1,0 +1,60 @@
+{
+  "dependency_files": [
+    "pyproject.toml"
+  ],
+  "entrypoints": [],
+  "existing_graphify_path": null,
+  "file_count_indexed": 10,
+  "generated_at": "2026-06-03T14:42:59+05:30",
+  "git": {
+    "branch": "hermes/project-intelligence-main/claude-conversation-viewer",
+    "dirty": false,
+    "head": "ed15334a2344ea175d8f5d1b5e21c3d7a18d6603",
+    "head_short": "ed15334",
+    "last_commit_at": "2026-04-29T18:23:52+05:30",
+    "origin": "git@github.com:eazyapp-tech/claude-conversation-viewer.git",
+    "status_entries": []
+  },
+  "git_tracked_file_count": 11,
+  "group": "standalone",
+  "kind": "python",
+  "language_counts": {
+    "markdown": 2,
+    "python": 7,
+    "toml": 1
+  },
+  "latest_source_mtime": "2026-06-03T14:42:38+05:30",
+  "name": "claude-conversation-viewer",
+  "project": "claude-conversation-viewer",
+  "repo": "/Users/gandharv/engineering-worktrees/project-intelligence-main/claude-conversation-viewer",
+  "samples_by_language": {
+    "markdown": [
+      "README.md",
+      "DOCS.md"
+    ],
+    "python": [
+      "claude_conversations_cli.py",
+      "setup.py",
+      "claude_conversation_viewer.py",
+      "claude_conversation_viewer/web.py",
+      "claude_conversation_viewer/__init__.py",
+      "claude_conversation_viewer/cli.py",
+      "claude_conversation_viewer/update_checker.py"
+    ],
+    "toml": [
+      "pyproject.toml"
+    ]
+  },
+  "security_note": "Secrets and credential-like files are excluded by name/pattern; index stores paths/counts only, not source contents.",
+  "top_level_counts": {
+    "DOCS.md": 1,
+    "README.md": 1,
+    "claude_conversation_viewer": 4,
+    "claude_conversation_viewer.py": 1,
+    "claude_conversations_cli.py": 1,
+    "pyproject.toml": 1,
+    "setup.py": 1
+  },
+  "total_indexed_bytes": 127865,
+  "version": 1
+}

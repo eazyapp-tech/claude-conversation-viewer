@@ -1,0 +1,9 @@
+# Hermes project intelligence local/generated artifacts
+cache/
+logs/
+tmp/
+raw/
+llm-runs/
+*.lock
+*.pid
+.DS_Store

@@ -1,0 +1,11 @@
+# Hermes project intelligence config
+version: 1
+project: claude-conversation-viewer
+repo_path: /Users/gandharv/engineering-worktrees/project-intelligence-main/claude-conversation-viewer
+memory_path: /Users/gandharv/engineering-worktrees/project-intelligence-main/claude-conversation-viewer/.hermes/memory
+graph_path: /Users/gandharv/engineering-worktrees/project-intelligence-main/claude-conversation-viewer/.hermes/graph
+policy:
+  secrets: never read or persist credentials, tokens, .env files, or connection strings
+  generated_cache: keep under .hermes/cache, .hermes/logs, .hermes/tmp, .hermes/raw, .hermes/llm-runs
+  commit_policy: commit reviewed human-readable memory docs; avoid committing noisy cache/log/raw artifacts
+updated_at: 2026-06-03T14:42:58+05:30
