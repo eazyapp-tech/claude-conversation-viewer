@@ -58,6 +58,31 @@ def decode_project_slug(slug: str) -> str:
 # JSONL parser
 # ---------------------------------------------------------------------------
 
+HANDOVER_SIGNATURE = "Read this conversation transcript and write a structured handover doc"
+HANDOVER_MARKER_RE = re.compile(r"<!--\s*handover-parent-session:\s*([a-f0-9-]{36})\s*-->")
+HANDOVER_SESSION_ID_RE = re.compile(r'"sessionId"\s*:\s*"([a-f0-9-]{36})"')
+
+
+def _extract_handover_parent_id(content: str, own_session_id: str) -> str | None:
+    """Resolve parent sessionId from a handover prompt's user message content.
+
+    Priority: explicit marker (deterministic) → most-frequent sessionId field in
+    embedded transcript (verified 70/70 on real data).
+    """
+    marker_match = HANDOVER_MARKER_RE.search(content)
+    if marker_match and marker_match.group(1) != own_session_id:
+        return marker_match.group(1)
+
+    counts: dict[str, int] = {}
+    for sid in HANDOVER_SESSION_ID_RE.findall(content):
+        if sid == own_session_id:
+            continue
+        counts[sid] = counts.get(sid, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
+
+
 def parse_conversation_metadata(filepath: Path) -> dict | None:
     """Fast scan: read only what we need for the list view."""
     session_id = filepath.stem
@@ -77,6 +102,8 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
     version = None
     slug = None
     is_continuation = False
+    is_handover = False
+    handover_parent_id: str | None = None
 
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -111,6 +138,19 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
                         user_msg_count += 1
                         if not is_continuation and "continued from a previous conversation" in content.lower():
                             is_continuation = True
+                        # Detect handover ONLY on the first user message: the spawner
+                        # always puts the prompt there, and tool results (which arrive
+                        # as synthetic "user" messages) can echo the signature when a
+                        # session reads the hook source. Also require the transcript
+                        # delimiter to rule out incidental quotes of the prompt.
+                        if (
+                            user_msg_count == 1
+                            and not is_handover
+                            and HANDOVER_SIGNATURE in content
+                            and "--- TRANSCRIPT ---" in content
+                        ):
+                            is_handover = True
+                            handover_parent_id = _extract_handover_parent_id(content, session_id)
                         if cwd is None:
                             cwd = obj.get("cwd")
                         if version is None:
@@ -139,11 +179,13 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
     if user_msg_count == 0 and assistant_msg_count == 0:
         return None
 
+    display_title = ai_title or ("Handover summary" if is_handover else title) or "(no title)"
+
     return {
         "id": session_id,
         "project": project_slug,
         "project_path": cwd or decode_project_slug(project_slug),
-        "title": ai_title or title or "(no title)",
+        "title": display_title,
         "has_ai_title": ai_title is not None,
         "first_timestamp": first_timestamp,
         "last_timestamp": last_timestamp,
@@ -160,6 +202,8 @@ def parse_conversation_metadata(filepath: Path) -> dict | None:
         "file_path": str(filepath),
         "slug": slug,
         "is_continuation": is_continuation,
+        "is_handover": is_handover,
+        "handover_parent_id": handover_parent_id,
     }
 
 
@@ -378,7 +422,14 @@ class ConversationStore:
                 linked_ids.add(sid)
 
         # Tier 2: timestamp proximity for unlinked continuations
-        unlinked = [c for c in self.conversations if c["is_continuation"] and c["id"] not in linked_ids]
+        # Exclude handovers — Tier 4 handles them via the deterministic parent-session marker,
+        # and timestamp proximity would mis-attach them to whichever session compacted last.
+        unlinked = [
+            c for c in self.conversations
+            if c["is_continuation"]
+            and c["id"] not in linked_ids
+            and not c.get("is_handover")
+        ]
         parent_of: dict[str, str] = {}
 
         for cont in unlinked:
@@ -429,6 +480,38 @@ class ConversationStore:
             self.chain_of[child_id] = root_id
             self.chain_of.setdefault(root_id, root_id)
 
+        # Tier 4: handover sessions — attach to parent chain via embedded sessionId.
+        # Pre-compact handover hook spawns a `claude -p` subprocess that embeds the
+        # parent transcript verbatim, so the parent's sessionId is recoverable from
+        # the first user message. Without this, every compaction creates an orphan
+        # session that floods the sidebar.
+        for cont in self.conversations:
+            if not cont.get("is_handover"):
+                continue
+            parent_id = cont.get("handover_parent_id")
+            if not parent_id or parent_id not in self.by_id:
+                continue
+            if cont["id"] == parent_id:
+                continue
+
+            target_root = self.chain_of.get(parent_id, parent_id)
+            cont_root = self.chain_of.get(cont["id"], cont["id"])
+            if cont_root == target_root:
+                continue
+
+            # If cont already heads a chain (e.g., Tier 1 slug-grouped sibling
+            # handovers), merge that whole chain into the target. Otherwise move
+            # just cont. Avoids the same handover appearing in two chains, which
+            # would clobber chain_index during annotation.
+            members_to_move = self.chains.pop(cont_root, [cont["id"]])
+            if target_root not in self.chains:
+                self.chains[target_root] = [target_root]
+            for sid in members_to_move:
+                if sid not in self.chains[target_root]:
+                    self.chains[target_root].append(sid)
+                self.chain_of[sid] = target_root
+            self.chain_of.setdefault(target_root, target_root)
+
         # Sort each chain by timestamp and annotate metadata
         for root_id, chain_ids in self.chains.items():
             unique_ids = list(dict.fromkeys(chain_ids))
@@ -446,12 +529,15 @@ class ConversationStore:
                 meta["chain_size"] = len(unique_ids)
                 if i == 0:
                     display_title = root_title or "Part 1"
+                elif meta.get("is_handover"):
+                    display_title = "Handover summary"
                 else:
                     display_title = meta["title"] if meta.get("has_ai_title") else f"Part {i + 1}"
                 chain_parts.append({
                     "id": sid,
                     "title": display_title,
                     "first_timestamp": meta.get("first_timestamp"),
+                    "is_handover": meta.get("is_handover", False),
                 })
 
             self.by_id[root_id]["chain_parts"] = chain_parts
@@ -870,6 +956,7 @@ body {
   border-radius: 4px;
 }
 .chain-child:hover { color: var(--text); background: var(--bg-tertiary); }
+.chain-child-handover { font-style: italic; opacity: 0.75; }
 
 .chain-divider {
   text-align: center;
@@ -1676,9 +1763,13 @@ function renderConversationList(convs) {
       : '';
     const chainChildren = (c.chain_parts && c.chain_parts.length > 1)
       ? `<div class="chain-children" id="chain-children-${c.id}">${
-          c.chain_parts.slice(1).map((p, i) =>
-            `<div class="chain-child" onclick="event.stopPropagation(); loadChain('${c.id}', '${p.id}')">Part ${i + 2} &middot; ${formatDate(p.first_timestamp)}${p.title ? ' &middot; ' + escapeHtml(p.title.substring(0, 40)) : ''}</div>`
-          ).join('')
+          c.chain_parts.slice(1).map((p, i) => {
+            const label = p.is_handover
+              ? `Handover &middot; ${formatDate(p.first_timestamp)}`
+              : `Part ${i + 2} &middot; ${formatDate(p.first_timestamp)}${p.title ? ' &middot; ' + escapeHtml(p.title.substring(0, 40)) : ''}`;
+            const cls = p.is_handover ? 'chain-child chain-child-handover' : 'chain-child';
+            return `<div class="${cls}" onclick="event.stopPropagation(); loadChain('${c.id}', '${p.id}')">${label}</div>`;
+          }).join('')
         }</div>`
       : '';
 
